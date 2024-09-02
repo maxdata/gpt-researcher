@@ -145,7 +145,7 @@ async def choose_agent(
             temperature=0,
             llm_provider=cfg.llm_provider,
             llm_kwargs=cfg.llm_kwargs,
-            cost_callback=cost_callback,
+            cost_callback=cost_callback,            
         )
 
         agent_dict = json.loads(response)
