@@ -167,11 +167,6 @@ export default function Home() {
       }
     } else {
       startResearch(chatBoxSettings);
-
-      // await Promise.all([
-      //   handleSourcesAndAnswer(newQuestion),
-      //   handleSimilarQuestions(newQuestion),
-      // ]);
     }
   };
 
