@@ -1,8 +1,11 @@
 import asyncio
+import random
 import time
 
+from typing import Set
+
 from gpt_researcher.config import Config
-from gpt_researcher.context.compression import ContextCompressor
+from gpt_researcher.context.compression import ContextCompressor, WrittenContentCompressor, VectorstoreCompressor
 from gpt_researcher.document import DocumentLoader, LangChainDocumentLoader
 from gpt_researcher.master.actions import *
 from gpt_researcher.memory import Memory
@@ -22,6 +25,8 @@ class GPTResearcher:
         tone: Tone = Tone.Objective,
         source_urls=None,
         documents=None,
+        vector_store=None,
+        vector_store_filter=None,
         config_path=None,
         websocket=None,
         agent=None,
@@ -56,15 +61,15 @@ class GPTResearcher:
         self.report_prompt: str = get_prompt_by_report_type(
             self.report_type
         )  # this validates the report type
-        self.report_source: str = report_source
         self.research_costs: float = 0.0
         self.cfg = Config(config_path)
-        self.retriever = get_retriever(self.headers.get("retriever")) or get_retriever(
-            self.cfg.retriever
-        ) or get_default_retriever()
+        self.report_source: str = self.cfg.report_source or report_source
+        self.retrievers = get_retrievers(self.headers, self.cfg)
         self.context = context
         self.source_urls = source_urls
         self.documents = documents
+        self.vector_store = vector_store
+        self.vector_store_filter = vector_store_filter
         self.memory = Memory(self.cfg.embedding_provider, self.headers)
         self.visited_urls: set[str] = visited_urls
         self.verbose: bool = verbose
@@ -126,6 +131,13 @@ class GPTResearcher:
             document_data = await DocumentLoader(self.cfg.doc_path).load()
             self.context = await self.__get_context_by_search(self.query, document_data)
 
+        # Hybrid search including both local documents and web sources
+        elif self.report_source == ReportSource.Hybrid.value:
+            document_data = await DocumentLoader(self.cfg.doc_path).load()
+            docs_context = await self.__get_context_by_search(self.query, document_data)
+            web_context = await self.__get_context_by_search(self.query)
+            self.context = f"Context from local documents: {docs_context}\n\nContext from web sources: {web_context}"
+
         elif self.report_source == ReportSource.LangChainDocuments.value:
             langchain_documents_data = await LangChainDocumentLoader(
                 self.documents
@@ -134,6 +146,8 @@ class GPTResearcher:
                 self.query, langchain_documents_data
             )
 
+        elif self.report_source == ReportSource.LangChainVectorStore.value:
+            self.context = await self.__get_context_by_vectorstore(self.query, self.vector_store_filter)
         # Default web based research
         else:
             self.context = await self.__get_context_by_search(self.query)
@@ -149,7 +163,7 @@ class GPTResearcher:
 
         return self.context
 
-    async def write_report(self, existing_headers: list = []):
+    async def write_report(self, existing_headers: list = [], relevant_written_contents: list = []):
         """
         Writes the report based on research conducted
 
@@ -162,7 +176,7 @@ class GPTResearcher:
             await stream_output(
                 "logs",
                 "task_summary_coming_up",
-                f"✍️ Writing summary for research task: {self.query}...",
+                f"✍️ Writing summary for research task: {self.query} (this may take a few minutes)...",
                 self.websocket,
             )
 
@@ -191,6 +205,7 @@ class GPTResearcher:
                 cfg=self.cfg,
                 main_topic=self.parent_query,
                 existing_headers=existing_headers,
+                relevant_written_contents=relevant_written_contents,
                 cost_callback=self.add_costs,
                 headers=self.headers,
             )
@@ -226,6 +241,38 @@ class GPTResearcher:
         scraped_sites = scrape_urls(new_search_urls, self.cfg)
         return await self.__get_similar_content_by_query(self.query, scraped_sites)
 
+    async def __get_context_by_vectorstore(self, query, filter: Optional[dict] = None):
+        """
+            Generates the context for the research task by searching the vectorstore
+        Returns:
+            context: List of context
+        """
+        context = []
+        # Generate Sub-Queries including original query
+        sub_queries = await self.__get_sub_queries(query)
+        # If this is not part of a sub researcher, add original query to research for better results
+        if self.report_type != "subtopic_report":
+            sub_queries.append(query)
+
+        if self.verbose:
+            await stream_output(
+                "logs",
+                "subqueries",
+                f"🗂️  I will conduct my research based on the following queries: {sub_queries}...",
+                self.websocket,
+                True,
+                sub_queries,
+            )
+
+        # Using asyncio.gather to process the sub_queries asynchronously
+        context = await asyncio.gather(
+            *[
+                self.__process_sub_query_with_vectorstore(sub_query, filter)
+                for sub_query in sub_queries
+            ]
+        )
+        return context
+
     async def __get_context_by_search(self, query, scraped_data: list = []):
         """
            Generates the context for the research task by searching the query and scraping the results
@@ -234,16 +281,7 @@ class GPTResearcher:
         """
         context = []
         # Generate Sub-Queries including original query
-        sub_queries = await get_sub_queries(
-            query=query,
-            agent_role_prompt=self.role,
-            cfg=self.cfg,
-            parent_query=self.parent_query,
-            report_type=self.report_type,
-            cost_callback=self.add_costs,
-            openai_api_key=self.headers.get("openai_api_key"),
-        )
-
+        sub_queries = await self.__get_sub_queries(query)
         # If this is not part of a sub researcher, add original query to research for better results
         if self.report_type != "subtopic_report":
             sub_queries.append(query)
@@ -266,6 +304,38 @@ class GPTResearcher:
             ]
         )
         return context
+
+    async def __process_sub_query_with_vectorstore(self, sub_query: str, filter: Optional[dict] = None):
+        """Takes in a sub query and gathers context from the user provided vector store
+
+        Args:
+            sub_query (str): The sub-query generated from the original query
+
+        Returns:
+            str: The context gathered from search
+        """
+        if self.verbose:
+            await stream_output(
+                "logs",
+                "running_subquery_with_vectorstore_research",
+                f"\n🔍 Running research for '{sub_query}'...",
+                self.websocket,
+            )
+
+        content = await self.__get_similar_content_by_query_with_vectorstore(sub_query, filter)
+
+        if content and self.verbose:
+            await stream_output(
+                "logs", "subquery_context_window", f"📃 {content}", self.websocket
+            )
+        elif self.verbose:
+            await stream_output(
+                "logs",
+                "subquery_context_not_found",
+                f"🤷 No content found for '{sub_query}'...",
+                self.websocket,
+            )
+        return content
 
     async def __process_sub_query(self, sub_query: str, scraped_data: list = []):
         """Takes in a sub query and scrapes urls based on it and gathers context.
@@ -328,36 +398,65 @@ class GPTResearcher:
 
     async def __scrape_data_by_query(self, sub_query):
         """
-        Runs a sub-query
+        Runs a sub-query across multiple retrievers and scrapes the resulting URLs.
+
         Args:
-            sub_query:
+            sub_query (str): The sub-query to search for.
 
         Returns:
-            Summary
+            list: A list of scraped content results.
         """
-        # Get Urls
-        retriever = self.retriever(sub_query)
-        search_results = await asyncio.to_thread(
-            retriever.search, max_results=self.cfg.max_search_results_per_query
-        )
-        new_search_urls = await self.__get_new_urls(
-            [url.get("href") for url in search_results]
-        )
+        new_search_urls = []
 
-        # Scrape Urls
+        # Iterate through all retrievers
+        for retriever_class in self.retrievers:
+            # Instantiate the retriever with the sub-query
+            retriever = retriever_class(sub_query)
+
+            # Perform the search using the current retriever
+            search_results = await asyncio.to_thread(
+                retriever.search, max_results=self.cfg.max_search_results_per_query
+            )
+
+            # Collect new URLs from search results
+            search_urls = [url.get("href") for url in search_results]
+            new_search_urls.extend(search_urls)
+
+        # Get unique URLs
+        new_search_urls = await self.__get_new_urls(new_search_urls)
+        random.shuffle(new_search_urls)
+
+        # Log the research process if verbose mode is on
         if self.verbose:
             await stream_output(
                 "logs",
                 "researching",
-                f"🤔 Researching for relevant information...\n",
+                f"🤔 Researching for relevant information across multiple sources...\n",
                 self.websocket,
             )
 
-        # Scrape Urls
+        # Scrape the new URLs
         scraped_content_results = await asyncio.to_thread(
             scrape_urls, new_search_urls, self.cfg
         )
+
         return scraped_content_results
+
+    async def __get_similar_content_by_query_with_vectorstore(self, query, filter):
+        if self.verbose:
+            await stream_output(
+                "logs",
+                "fetching_query_content",
+                f"📚 Getting relevant content based on query: {query}...",
+                self.websocket,
+            )  
+
+        # Summarize data fetched from vector store
+        vectorstore_compressor = VectorstoreCompressor(self.vector_store, filter)
+
+        return await vectorstore_compressor.async_get_context(
+            query=query, max_results=8
+        )
 
     async def __get_similar_content_by_query(self, query, pages):
         if self.verbose:
@@ -444,3 +543,120 @@ class GPTResearcher:
             )
 
         return subtopics
+
+    async def get_draft_section_titles(self):
+        """
+        Writes the draft section titles based on research conducted. The draft section titles are used to retrieve the previous relevant written contents.
+
+        Returns:
+            str: The headers markdown text
+        """
+        if self.verbose:
+            await stream_output(
+                "logs",
+                "task_summary_coming_up",
+                f"✍️ Writing draft section titles for research task: {self.query}...",
+                self.websocket,
+            )
+
+        draft_section_titles = await generate_draft_section_titles(
+            query=self.query,
+            context=self.context,
+            agent_role_prompt=self.role,
+            report_type=self.report_type,
+            websocket=self.websocket,
+            cfg=self.cfg,
+            main_topic=self.parent_query,
+            cost_callback=self.add_costs,
+            headers=self.headers,
+        )
+
+        return draft_section_titles
+    
+    async def __get_similar_written_contents_by_query(self,
+            query: str,
+            written_contents: List[Dict],
+            similarity_threshold: float = 0.5,
+            max_results: int = 10
+        ) -> List[str]:
+        """
+        Asynchronously retrieves similar written contents based on a given query.
+
+        Args:
+            query (str): The query to search for similar written contents.
+            written_contents (List[Dict]): List of written contents to search through.
+            similarity_threshold (float, optional): The minimum similarity score for content to be considered relevant. 
+                                                    Defaults to 0.5.
+            max_results (int, optional): The maximum number of similar contents to return. Defaults to 10.
+
+        Returns:
+            List[str]: A list of similar written contents, limited by max_results.
+        """
+        if self.verbose:
+            await stream_output(
+                "logs",
+                "fetching_relevant_written_content",
+                f"🔎 Getting relevant written content based on query: {query}...",
+                self.websocket,
+            )
+
+        # Retrieve similar written contents based on the query
+        # Use a higher similarity threshold to ensure more relevant results and reduce irrelevant matches
+        written_content_compressor = WrittenContentCompressor(
+            documents=written_contents, embeddings=self.memory.get_embeddings(), similarity_threshold=similarity_threshold
+        )
+        return await written_content_compressor.async_get_context(
+            query=query, max_results=max_results, cost_callback=self.add_costs
+        )
+
+    async def __get_sub_queries(self, query):
+        # Generate Sub-Queries including original query
+        return await get_sub_queries(
+            query=query,
+            agent_role_prompt=self.role,
+            cfg=self.cfg,
+            parent_query=self.parent_query,
+            report_type=self.report_type,
+            cost_callback=self.add_costs,
+        )
+    
+    async def get_similar_written_contents_by_draft_section_titles(
+        self, 
+        current_subtopic: str, 
+        draft_section_titles: List[str],
+        written_contents: List[Dict],
+        max_results: int = 10
+    ) -> List[str]:
+        """
+        Retrieve similar written contents based on current subtopic and draft section titles.
+        
+        Args:
+        current_subtopic (str): The current subtopic.
+        draft_section_titles (List[str]): List of draft section titles.
+        written_contents (List[Dict]): List of written contents to search through.
+        max_results (int): Maximum number of results to return. Defaults to 10.
+        
+        Returns:
+        List[str]: List of relevant written contents.
+        """
+        all_queries = [current_subtopic] + draft_section_titles
+        
+        async def process_query(query: str) -> Set[str]:
+            return set(await self.__get_similar_written_contents_by_query(query, written_contents))
+
+        # Run all queries in parallel
+        results = await asyncio.gather(*[process_query(query) for query in all_queries])
+        
+        # Combine all results
+        relevant_contents = set().union(*results)
+
+        # Limit the number of results
+        relevant_contents = list(relevant_contents)[:max_results]
+
+        if relevant_contents and self.verbose:
+            prettier_contents = "\n".join(relevant_contents)
+            await stream_output(
+                "logs", "relevant_contents_context", f"📃 {prettier_contents}", self.websocket
+            )
+
+        return relevant_contents
