@@ -21,7 +21,7 @@ const Hero: FC<THeroProps> = ({
     <div>
 
       <div className="flex flex-col items-center justify-center">
-        <div className="landing flex flex-col items-center">
+        {/* <div className="landing flex flex-col items-center">
             <h1 className="text-4xl font-extrabold text-center lg:text-7xl">
               Say Goodbye to <br />
               <span
@@ -37,7 +37,7 @@ const Hero: FC<THeroProps> = ({
             <h2 className="text-xl font-light text-center mb-4 ml-[20vw] mr-[20vw] mb-10 text-gray-300">
               Say Hello to GPT Researcher, your AI mate for rapid insights and comprehensive research
             </h2>
-        </div>
+        </div> */}
         
 
         {/* input section */}

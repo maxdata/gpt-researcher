@@ -10,7 +10,6 @@ import Sources from "@/components/Sources";
 import Question from "@/components/Question";
 import SubQuestions from "@/components/SubQuestions";
 import { useRef, useState, useEffect } from "react";
-import AccessReport from '../components/Task/AccessReport';
 import Accordion from '../components/Task/Accordion';
 import LogMessage from '../components/Task/LogMessage';
 
@@ -308,17 +307,7 @@ export default function Home() {
       } else if (data.type === 'langgraphButton') {
         const uniqueKey = `langgraphButton-${index}`;
         return (
-          <div></div>
-          // <div key={uniqueKey} className="flex justify-center py-4">
-          //   <a
-          //     href={data.link}
-          //     target="_blank"
-          //     rel="noopener noreferrer"
-          //     className="px-4 py-2 text-white bg-[#0DB7ED] rounded"
-          //   >
-          //     View the full Langgraph logs here
-          //   </a>
-          // </div>
+          <div></div>          
         );
       } else if (data.type === 'question') {
         const uniqueKey = `question-${index}`;
@@ -335,8 +324,6 @@ export default function Home() {
               handleClickSuggestion={handleClickSuggestion}
             />
           );
-        } else if (type === 'path') {
-          return <AccessReport key={uniqueKey} accessData={output} report={answer} />;
         } else {
           return null;
         }

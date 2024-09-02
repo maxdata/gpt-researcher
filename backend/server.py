@@ -94,17 +94,17 @@ async def websocket_endpoint(websocket: WebSocket):
                         report = str(report)
 
                     # Saving report as pdf
-                    pdf_path = await write_md_to_pdf(report, sanitized_filename)
+                    # pdf_path = await write_md_to_pdf(report, sanitized_filename)
                     # Saving report as docx
-                    docx_path = await write_md_to_word(report, sanitized_filename)
+                    # docx_path = await write_md_to_word(report, sanitized_filename)
                     # Returning the path of saved report files
                     md_path = await write_text_to_md(report, sanitized_filename)
                     await websocket.send_json(
                         {
                             "type": "path",
                             "output": {
-                                "pdf": pdf_path,
-                                "docx": docx_path,
+                                # "pdf": pdf_path,
+                                # "docx": docx_path,
                                 "md": md_path,
                             },
                         }

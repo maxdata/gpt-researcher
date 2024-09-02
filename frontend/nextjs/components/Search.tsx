@@ -3,7 +3,6 @@ import React, { useState, useEffect } from 'react';
 import ResearchForm from './Task/ResearchForm';
 import Report from './Task/Report';
 import AgentLogs from './Task/AgentLogs';
-import AccessReport from './Task/AccessReport';
 import InputArea from './InputArea';
 
 
@@ -57,7 +56,6 @@ const Search = () => {
       
       <AgentLogs agentLogs={agentLogs} />
       <Report report={report} />
-      <AccessReport accessData={accessData} />
     </div>
   );
 };
